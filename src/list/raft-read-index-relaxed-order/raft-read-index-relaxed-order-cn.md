@@ -1,5 +1,7 @@
 ## Raft: (Optimize): ReadIndex: Less Latency through Relaxed Ordering
 
+2026-11-15：为只由 Leader 处理的读请求增加了约束条件，by [drmingdrmer](https://github.com/drmingdrmer)
+
 This approach is proposed by [neog24](https://github.com/neog24)
 
 ![](architecture.drawio.svg)
@@ -35,12 +37,55 @@ This approach is proposed by [neog24](https://github.com/neog24)
 
 ### Linearizable 的保证
 
-以下分析假设：Leader 把写请求 apply 到自己的 StateMachine 之后，才向客户端返回应答。
+以下分析假设：写请求向客户端返回应答之前，它的结果已经能从 Leader 的 StateMachine 中读到。只把日志 apply 完还不够，例如 StateMachine 可能在一批日志都 apply 之后，才统一提交事务。
 
-Follower 上的读请求还需要一条规则。Follower 可能先于 Leader apply 当前 Term 的日志。如果 Follower 用这个状态回答了读请求，之后 Leader 上的读请求只等待 NoopIndex，就可能读不到这个状态。下面两条规则都能避免这个问题，任选其一即可：
+读请求还需要一条规则。有两种节点可能先于当前 Leader apply 当前 Term 的日志：一种是 Follower；另一种是在第 3 步之后、读取 StateMachine 之前下台的 Leader，它作为新 Leader 的 Follower 继续 apply 日志。如果这样的节点用这个状态回答了读请求，之后 Leader 上的读请求只等待 NoopIndex，就可能读不到这个状态。下面两条规则都能避免这个问题，任选其一即可：
 
-- **只由 Leader 处理读请求**：只有 Leader 处理 Linearizable 的读请求。
-- **或者，Follower 等 Leader apply 之后再应答**：Follower 也处理 Linearizable 的读请求。Follower 上的读请求使用标准的 ReadIndex 流程：Leader 执行第 1 到第 3 步，把 ReadIndex 发给 Follower，Follower 等自己的 AppliedIndex 达到 ReadIndex 之后读取。此外，Follower 要等 Leader 的 AppliedIndex 达到 Follower 读取时的 AppliedIndex，才向客户端返回应答。
+- **只由 Leader 处理读请求**：只有 Leader 处理 Linearizable 的读请求。此外，读请求要从同一个 StateMachine 快照中，读出结果和最后一条已 apply 日志的 Term。如果这个 Term 比 Leader 确认身份时的 Term 新，就丢弃结果，重新执行读请求。所有 Linearizable 的读请求都要做这个检查，包括使用标准 ReadIndex 流程的读请求。
+- **或者，Follower 只 apply Leader 已经 apply 过的日志**：Follower 也处理 Linearizable 的读请求。Follower 上的读请求使用标准的 ReadIndex 流程：Leader 执行第 1 到第 3 步，把 ReadIndex 发给 Follower，Follower 等自己的 AppliedIndex 达到 ReadIndex 之后读取。此外，Leader 在 AppendEntries 和 heartbeat 中告诉 Follower 可以 apply 到哪里时，发的不是 CommitIndex，而是 Leader 自己的 AppliedIndex。每个节点当 Leader 时都要这样做。这样任何节点都不会先于当时的 Leader apply 日志，Leader 下台之后才完成的读请求也一样。Leader 仍然按 Quorum 判断日志是否提交，Follower 只是晚一些 apply，不影响 Raft 的安全性。
+
+第一条规则中的 Term 检查是必需的，只由 Leader 处理读请求还不够。在下面这个反例中，读请求都发给了 Leader，但没有检查 Term。
+
+设 `x = 0`。A 是 Term `T` 的 Leader，它的 Noop log 在 index `10`，已经 apply 到 index `20`。这个例子中没有写请求把 `x` 改回去。
+
+1. A 在 Term `T` 中为读请求 `R_A` 确认了 Leader 身份。ReadIndex 是 NoopIndex `10`，已经 apply。`R_A` 在读取 StateMachine 之前暂停。
+2. A 下台。B 成为 Term `T+1` 的 Leader，提交并 apply 了 index `21` 的 Noop log。
+3. B 提交了 index `22` 的日志，它把 `x` 设为 `1`。B 的 apply 在这条日志之前暂停：B 的 CommitIndex 是 `22`，AppliedIndex 是 `21`，`x = 0`。这个写请求还没有应答。
+4. B 把日志 `22` 和 CommitIndex 发给 A，A 作为 Follower apply 了它：A 的 AppliedIndex 是 `22`，`x = 1`。标准 Raft 中，Follower apply 日志不需要等 Leader 先 apply。
+5. `R_A` 在 A 上恢复，读到 `x = 1`，返回给客户端。
+6. 客户端收到这个应答之后，才向 B 发起读请求 `R_B`。B 确认了 Leader 身份，ReadIndex 是 NoopIndex `21`，已经 apply。
+7. B 还没有 apply 日志 `22`，`R_B` 返回 `x = 0`。之后再 apply `22`，也无法挽回这次回退。
+
+时间从上往下走，图中的数字是日志 index，不是 Term：
+
+```text
+Time   Client                 A                                  B
+----   --------------------   --------------------------------   ----------------------------
+t1     Invoke R_A ----------> Confirm leadership in T
+                              ReadIndex = NoopIndex 10
+                              Pause before reading
+
+t2                            Step down; become Follower         Become Leader in T+1
+                                                                 Apply Noop log 21; x=0
+
+t3                                                               Commit 22: x=1
+                                                                 AppliedIndex stays 21; x=0
+                                                                 Write not replied yet
+
+t4                            Receive 22 and CommitIndex 22
+                              Apply 22 as Follower; x=1
+
+t5     Receive x=1 <--------- Resume R_A; read and return 1
+
+t6     Invoke R_B ---------------------------------------------> Confirm leadership in T+1
+                                                                 ReadIndex = NoopIndex 21
+
+t7     Receive x=0 <-------------------------------------------- Read and return 0
+```
+
+两个读请求没有重叠：`R_A` 的应答早于 `R_B` 的发起，所以 Linearizable 要求 `R_A` 排在 `R_B` 之前。`R_A` 读到了 `x = 1`，说明那个还没有应答的写请求排在 `R_A` 之前，所以 `R_B` 不能返回 `0`。两个读请求都发给了 Leader，A 只是因为 `R_A` 跨过了下台，才以 Follower 的身份读取 StateMachine。
+
+两条规则都能挡住这个反例。在第一条规则下，`R_A` 读到的最后一条日志 `22` 属于 Term `T+1`，比 `T` 新，`R_A` 会丢弃结果，重新执行。在第二条规则下，B 告诉 A 最多只能 apply 到 B 的 AppliedIndex `21`，A 不能先于 B apply 日志 `22`，`R_A` 只能读到 `x = 0`。
 
 假设对于一个读请求 `r`, 在 `t` 时刻被 Raft server 收到:
 
@@ -48,13 +93,13 @@ Follower 上的读请求还需要一条规则。Follower 可能先于 Leader app
 
 - **如果 `w` 是由当前 Leader 之前的其他 Leader propose 的**：当 AppliedIndex 达到 NoopIndex 后，StateMachine 已经包含了所有之前 Leader 提交的日志。因此，读请求 `r` 一定能够读取到写请求 `w` 的结果。
 - **如果 `w` 是由当前 Leader propose 的**：
-  - **如果 `w` 已经向客户端返回应答**：说明 `w` 已经被应用到 StateMachine。所以 `r` 必然能够从 StateMachine 中读取到 `w` 的结果。
+  - **如果 `w` 已经向客户端返回应答**：根据前面的假设，`w` 的结果已经能从 StateMachine 中读到。所以 `r` 必然能够从 StateMachine 中读取到 `w` 的结果。
   - **如果 `w` 尚未向客户端返回应答**：根据优化后的先后顺序定义，`w` 和 `r` 之间没有明确的先后关系。无论 `r` 是否读取到 `w` 的结果，都符合 Linearizable 的要求。
 
 #### 对于时间 `t` 之前的读请求 `r0`
 
-- **如果 `r0` 是在之前的 Leader 上被处理的**：由于`r0` 只能看到已经提交的内容, 而当前 Leader 一定包含以前所有 Leader 所提交的内容, 所有以前 Leader 提交的内容都在 Noop log 之前，因此，读请求 `r` 读到的状态一定包含了 `r0` 看到的状态。
-- **如果 `r0` 是在 Follower 上被处理的**（只在第二条规则下可能发生）：`r0` 返回应答之前，这个 Follower 的 Leader 已经 apply 了 `r0` 读到的状态。如果这个 Leader 就是当前 Leader，`r` 之后读取的是同一个 StateMachine。如果它是之前的 Leader，这个状态只包含之前的 Leader 提交的日志，这些日志都在 Noop log 之前。两种情况下，读请求 `r` 读到的状态都一定包含了 `r0` 看到的状态。
+- **如果 `r0` 是在之前的 Leader 上被处理的**（第一条规则）：读请求会检查 Term，所以 `r0` 读到的状态中，最后一条日志的 Term 不比那个 Leader 的 Term 新，这些日志的 Term 都比当前 Term 小。它们都已经提交，当前 Leader 一定包含它们，而且它们都在 Noop log 之前。因此，读请求 `r` 读到的状态一定包含了 `r0` 看到的状态。
+- **如果 `r0` 是在其他节点上被处理的**（第二条规则）：包括 Follower、之前的 Leader，以及下台之后才读取的 Leader。这个节点 apply 的每条日志，都已经先被当时的 Leader apply 过。如果那个 Leader 就是当前 Leader，`r` 之后读取的是同一个 StateMachine。如果它是之前的 Leader，这些日志都已经提交，Term 都比当前 Term 小，所以都在 Noop log 之前。两种情况下，读请求 `r` 读到的状态都一定包含了 `r0` 看到的状态。
 - **`r0` 在当前服务器上处理**：可以认为服务器按照顺序处理请求。由于 `r0` 在 `r` 之前处理，`r` 一定能够读取到至少与 `r0` 相同的状态。
 
 我们可以看出，该优化在放宽请求先后顺序定义的情况下，仍然能够保证 Linearizable。这种优化减少了读操作的等待时间。
