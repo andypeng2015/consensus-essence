@@ -92,6 +92,8 @@ The two reads do not overlap: `R_A` replies before `R_B` is sent, so linearizabi
 
 Both rules block this counterexample. Under the first rule, the last log `R_A` read, `22`, belongs to term `T+1`, which is newer than `T`, so `R_A` discards the result and runs again. Under the second rule, B tells A that it may apply only up to B's AppliedIndex `21`. A cannot apply log `22` before B does, so `R_A` can only read `x = 0`.
 
+The counterexample and both rules are model-checked within small bounds in the TLA+ model [`tla/RelaxedReadApplied.tla`](tla/RelaxedReadApplied.tla); this is not a proof. With neither rule, the model finds this counterexample. With either rule, it finds no linearizability violation within the bounds. The cases and bounds are in [`tla/model.json`](tla/model.json), and [`tla/run.py`](tla/run.py) runs them.
+
 Assume a read request `r` is received by the Raft server at time `t`. Let's consider both write and read requests that occurred before time `t`.
 
 #### For a Write Request `w` Before Time `t`

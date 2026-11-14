@@ -1,0 +1,157 @@
+{
+  "module": "RelaxedReadApplied",
+  "constants": {
+    "N": 3,
+    "MaxTerm": 2,
+    "MaxLog": 5,
+    "MaxReads": 2,
+    "CommittedAdvCount": 0,
+    "AllowStdRead": true,
+    "AllowXferRead": true,
+    "Validate": false,
+    "RespondAfterApply": true
+  },
+  "invariants": [
+    "TypeOK",
+    "AppliedLEKnown",
+    "KnownLECommit",
+    "Linearizable",
+    "NoApplyAheadOfLeader"
+  ],
+  "cases": {
+    "three_terms": {
+      "constants": {
+        "MaxTerm": 3,
+        "MaxLog": 4
+      }
+    },
+    "pr2317_leader_only_validated": {
+      "constants": {
+        "CommittedAdvCount": 3,
+        "AllowStdRead": false,
+        "AllowXferRead": false,
+        "Validate": true
+      },
+      "invariants": [
+        "TypeOK",
+        "AppliedLEKnown",
+        "KnownLECommit",
+        "Linearizable"
+      ]
+    },
+    "advertise_committed_relaxed_only": {
+      "constants": {
+        "CommittedAdvCount": 3,
+        "AllowStdRead": false,
+        "AllowXferRead": false
+      },
+      "invariants": [
+        "TypeOK",
+        "AppliedLEKnown",
+        "KnownLECommit",
+        "Linearizable"
+      ],
+      "violation": "Linearizable"
+    },
+    "advertise_committed": {
+      "constants": {
+        "CommittedAdvCount": 3
+      },
+      "invariants": [
+        "TypeOK",
+        "AppliedLEKnown",
+        "KnownLECommit",
+        "Linearizable"
+      ],
+      "violation": "Linearizable"
+    },
+    "mixed_rollout": {
+      "constants": {
+        "CommittedAdvCount": 1
+      },
+      "invariants": [
+        "TypeOK",
+        "AppliedLEKnown",
+        "KnownLECommit",
+        "Linearizable"
+      ],
+      "violation": "Linearizable"
+    },
+    "mixed_rollout_relaxed_only": {
+      "constants": {
+        "CommittedAdvCount": 1,
+        "AllowStdRead": false,
+        "AllowXferRead": false,
+        "MaxTerm": 3,
+        "MaxLog": 4
+      },
+      "invariants": [
+        "TypeOK",
+        "AppliedLEKnown",
+        "KnownLECommit",
+        "Linearizable"
+      ],
+      "violation": "Linearizable"
+    },
+    "pr2317_with_std_reads": {
+      "constants": {
+        "CommittedAdvCount": 3,
+        "AllowXferRead": false,
+        "Validate": true
+      },
+      "invariants": [
+        "TypeOK",
+        "AppliedLEKnown",
+        "KnownLECommit",
+        "Linearizable"
+      ],
+      "violation": "Linearizable"
+    },
+    "respond_on_commit": {
+      "constants": {
+        "RespondAfterApply": false
+      },
+      "violation": "Linearizable"
+    },
+    "witness_stale_next_term_relaxed": {
+      "witness": "NeverStaleNextTermRelaxed"
+    },
+    "witness_follower_std_read": {
+      "witness": "NeverFollowerStdRead"
+    },
+    "witness_follower_xfer_read": {
+      "witness": "NeverFollowerXferRead"
+    }
+  },
+  "scope": [
+    "Nodes 1..N; MaxReads read operations. Two bounds for normal cases: two terms with a log of at most 5 entries (default), and three terms with at most 4 entries (three_terms). Deadlock checking is off and liveness is not claimed.",
+    "Replication is one global log of entries that are or will be committed. Uncommitted entries that a later leader discards are omitted: no node applies them and their writes never respond, so reads cannot observe them.",
+    "Every node holds the whole global log; a node applies up to `known`, the bound learned from a leader. Real replication lag only removes behaviors.",
+    "Learn reads the current leader's advertised bound at send time. Delayed or stale AppendEntries are covered because `known` only grows, applying is a separate step, and a stale leader's bound is below the current no-op.",
+    "Only the latest elected leader appends and commits. Commit through k requires k >= the term's no-op index (the current-term commit rule).",
+    "Read authorization is atomic and requires the reading leader to be the latest elected leader. This stands for a ReadIndex quorum confirmation or a valid lease, both of which rule out a higher-term leader at that point.",
+    "Read invocation is merged into authorization, and the response into the query sample. Both make `floor` at least as large as in a real execution, so a pass covers later invocations and later responses.",
+    "A read's state is the applied prefix of one node; the property compares the number of writes in prefixes of the committed log.",
+    "`applied` means visible to fresh state-machine queries. RespondAfterApply=false lets a write respond once committed, before its proposer's state includes it.",
+    "Snapshot installation is not a separate action. A snapshot holds at most the leader's applied prefix, which Learn plus Apply reach with an equal or larger bound in both advertising modes. Crash, restart and log purge are not modeled.",
+    "With Validate, a relaxed read rejects a sampled entry whose term differs from the authorizing term; no retry is modeled.",
+    "A finished read keeps only whether it satisfied Linearizable and a witness tag; a write response only raises doneFloor. Neither affects later behavior.",
+    "Read ids are interchangeable, so reads start in id order (symmetry breaking)."
+  ],
+  "source_map": {
+    "Elect": "openraft/src/engine/engine_impl.rs::establish_leader",
+    "ClientWrite": "openraft/src/engine/handler/leader_handler/mod.rs::leader_append_entries",
+    "Commit": "openraft/src/engine/handler/replication_handler/mod.rs::try_commit_quorum_accepted",
+    "Learn (CommittedAdvCount covers the node)": "openraft/src/replication/stream_state.rs::next_request, openraft/src/core/heartbeat/worker.rs::do_run, openraft/src/core/raft_core.rs::handle_append_entries_request, openraft/src/raft_state/mod.rs::update_committed",
+    "Learn (node advertises applied)": "design: issue databendlabs/openraft#2330, no code",
+    "Apply": "openraft/src/core/sm/worker.rs::apply",
+    "WriteRespond": "openraft/src/storage/v2/apply_responder.rs::send",
+    "StartRead relaxed": "openraft/src/raft/mod.rs::read_relaxed, openraft/src/core/raft_core.rs::handle_get_linearizer, openraft/src/raft/linearizable_read/lease_read_state.rs::try_linearizer",
+    "StartRead std": "openraft/src/engine/handler/leader_handler/mod.rs::get_linearizer",
+    "StartRead xfer": "design: barrier max(noop, leader applied at authorization), no code",
+    "FinishRead": "openraft/src/raft/linearizable_read/linearizer.rs::try_await_ready, openraft/src/raft/mod.rs::read_relaxed"
+  },
+  "audit": [
+    "Witness NeverStaleNextTermRelaxed first matched a node re-elected in the next term, not a stepped-down node. Tightened it to a relaxed read finishing on a node that is no longer leader and returning a write of a later leadership."
+  ]
+}

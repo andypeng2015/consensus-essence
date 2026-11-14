@@ -87,6 +87,8 @@ t7     Receive x=0 <-------------------------------------------- Read and return
 
 两条规则都能挡住这个反例。在第一条规则下，`R_A` 读到的最后一条日志 `22` 属于 Term `T+1`，比 `T` 新，`R_A` 会丢弃结果，重新执行。在第二条规则下，B 告诉 A 最多只能 apply 到 B 的 AppliedIndex `21`，A 不能先于 B apply 日志 `22`，`R_A` 只能读到 `x = 0`。
 
+这个反例和两条规则都用 TLA+ 模型 [`tla/RelaxedReadApplied.tla`](tla/RelaxedReadApplied.tla) 做了有界的模型检查，这不是证明：两条规则都不用时，模型找到了这个反例；只用其中任意一条时，在检查的范围内没有违反 Linearizable。用例和检查范围见 [`tla/model.json`](tla/model.json)，运行方法见 [`tla/run.py`](tla/run.py)。
+
 假设对于一个读请求 `r`, 在 `t` 时刻被 Raft server 收到:
 
 #### 对于时间 `t` 之前发生的写请求 `w`
