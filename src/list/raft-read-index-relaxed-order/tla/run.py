@@ -2,7 +2,7 @@
 """Model-check RelaxedReadApplied.tla with TLC for every case in model.json.
 
 Usage:
-  ./run.py                    run every case (about 8 minutes with 8 workers)
+  ./run.py                    run every case (about 14 minutes with 12 workers)
   ./run.py --case default     run one case; repeat --case for more
   ./run.py --list             list the cases
   ./run.py --workers 4        TLC worker threads (default: half of the CPUs)
